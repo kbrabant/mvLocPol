@@ -1,9 +1,7 @@
 function [Yhat, L] = mvlocpol(X, y, Xt, options)
-% MVLOCPOL  Fast multivariate local polynomial regression (degrees 0..3)
-%
+% MVLOCPOL-  Fast multivariate local polynomial regression (degrees 0,1,2,3)
 % OPTIMIZED VERSION with parallel processing and vectorization
-%
-% [Yhat, L] = mvlocpol(X, y, Xt, options)
+% Usage- [Yhat, L] = mvlocpol(X, y, Xt, options)
 %
 % Inputs:
 %   X   : n x d design points
@@ -20,6 +18,9 @@ function [Yhat, L] = mvlocpol(X, y, Xt, options)
 %       .parallel logical, use parallel processing (default false)
 %       .blockSize evaluation points per block (default 2000)
 %       .returnSmoother logical, default false
+% Outputs:
+% Yhat- Smoothed estimates from local polynomial regression of degree p
+% L- Smoother matrix from local polynomial regression of degree p
 
 % Basic checks & defaults
 if nargin < 4, options = struct(); end
