@@ -1,1 +1,101 @@
+function [Yhat, L] = mvlocpol(X, y, Xt, options)
+% MVLOCPOL  Fast multivariate local polynomial regression (degrees 0..3)
+%
+% OPTIMIZED VERSION with parallel processing and vectorization
+%
+% [Yhat, L] = mvlocpol(X, y, Xt, options)
+%
+% Inputs:
+%   X   : n x d design points
+%   y   : n x 1 responses
+%   Xt  : m x d evaluation points
+%   options: struct with fields
+%       .degree (0..3) default 1
+%       .H      dxd bandwidth matrix (required)
+%       .k      integer, number of nearest neighbors to use (optional)
+%       .radius scalar, radius for neighbor truncation (optional)
+%       .kernel {'gauss','epa','bimodgauss','triangle'} default 'gauss'
+%       .regularization  scalar added to Gram diag (default 1e-10)
+%       .gpu    logical, default false
+%       .parallel logical, use parallel processing (default false)
+%       .blockSize evaluation points per block (default 2000)
+%       .returnSmoother logical, default false
 
+% Basic checks & defaults
+if nargin < 4, options = struct(); end
+[n, d] = size(X);
+if size(y,1) ~= n, error('X and y dimension mismatch'); end
+[m, dt] = size(Xt);
+if dt ~= d, error('X and Xt dimension mismatch'); end
+
+degree = getopt(options,'degree',1);
+H = getopt(options,'H',[]);
+if isempty(H), error('options.H (bandwidth matrix) is required'); end
+kernelName = getopt(options,'kernel','gauss');
+k = getopt(options,'k',[]);
+radius = getopt(options,'radius',[]);
+reg = getopt(options,'regularization',1e-10);
+useGPU = getopt(options,'gpu',false);
+useParallel = getopt(options,'parallel',false);
+blockSize = getopt(options,'blockSize',2000);
+returnS = getopt(options,'returnSmoother',false);
+
+if isscalar(H)
+    H = eye(d)*H;
+end
+
+% Precompute constants
+invH = H \ eye(d);  % More stable than inv()
+detH = max(eps,det(H));
+kernelConst = kernel_constants(kernelName, degree, detH);
+
+% Prepare polynomial basis info
+[terms, p] = poly_terms(d, degree);
+constIdx = find(all(terms==0,2),1);
+
+% Move to GPU if requested (GPU and parallel are mutually exclusive)
+if useGPU
+    Xg = gpuArray(X);
+    yg = gpuArray(y);
+    Xtg = gpuArray(Xt);
+    invH = gpuArray(invH);
+    useParallel = false;  % Can't use both GPU and parallel
+else
+    Xg = X; yg = y; Xtg = Xt;
+end
+
+Yhat = zeros(m,1,'like',Xg);
+
+% Preallocate for smoother matrix
+if returnS
+    if ~isempty(k) || ~isempty(radius)
+        maxNNZ = m * min(n, max(k, 100));
+        rows = zeros(maxNNZ, 1);
+        cols = zeros(maxNNZ, 1);
+        vals = zeros(maxNNZ, 1);
+        nnzCount = 0;
+    else
+        warning('Returning full smoother matrix of size %d x %d (memory heavy).', m, n);
+        Lfull = zeros(m,n,'like',Xg);
+    end
+end
+
+% Precompute neighbor search structure
+useNN = ~isempty(k) || ~isempty(radius);
+if useNN && ~useGPU
+    try
+        kd = createns(X,'NSMethod','kdtree');
+    catch
+        kd = [];
+    end
+else
+    kd = [];
+end
+
+% Precompute X * invH for Mahalanobis distances
+XinvH = Xg * invH;  % n x d
+
+% Determine number of blocks
+numBlocks = ceil(m / blockSize);
+blockStarts = 1:blockSize:m;
+blockEnds = min(blockStarts + blockSize - 1, m);
