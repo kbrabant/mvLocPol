@@ -100,3 +100,159 @@ XinvH = Xg * invH;  % n x d
 numBlocks = ceil(m / blockSize);
 blockStarts = 1:blockSize:m;
 blockEnds = min(blockStarts + blockSize - 1, m);
+
+% PARALLEL IMPLEMENTATION
+if useParallel && ~useGPU
+    % Check if parallel pool exists
+    p = gcp('nocreate');
+    if isempty(p)
+        try
+            parpool;  % Start default parallel pool
+        catch
+            warning('Could not start parallel pool. Running serially.');
+            useParallel = false;
+        end
+    end
+    
+    if useParallel
+        % Preallocate cell arrays for parallel blocks
+        YhatBlocks = cell(numBlocks, 1);
+        if returnS
+            rowsBlocks = cell(numBlocks, 1);
+            colsBlocks = cell(numBlocks, 1);
+            valsBlocks = cell(numBlocks, 1);
+        end
+        
+        % Process blocks in parallel
+        parfor blockIdx = 1:numBlocks
+            i0 = blockStarts(blockIdx);
+            i1 = blockEnds(blockIdx);
+            
+            % Call helper function for each block
+            if returnS
+                [YhatBlocks{blockIdx}, rowsBlocks{blockIdx}, ...
+                 colsBlocks{blockIdx}, valsBlocks{blockIdx}] = ...
+                    process_block(i0, i1, Xg, yg, Xtg, invH, kd, ...
+                    kernelName, kernelConst, terms, constIdx, ...
+                    reg, k, radius, useNN, true);
+            else
+                YhatBlocks{blockIdx} = ...
+                    process_block(i0, i1, Xg, yg, Xtg, invH, kd, ...
+                    kernelName, kernelConst, terms, constIdx, ...
+                    reg, k, radius, useNN, false);
+            end
+        end
+        
+        % Combine results from parallel blocks
+        blockIdx = 1;
+        for i0 = blockStarts
+            i1 = blockEnds(blockIdx);
+            Yhat(i0:i1) = YhatBlocks{blockIdx};
+            
+            if returnS && exist('nnzCount', 'var')
+                newEntries = length(rowsBlocks{blockIdx});
+                if newEntries > 0
+                    if nnzCount + newEntries > length(rows)
+                        rows = [rows; zeros(maxNNZ, 1)];
+                        cols = [cols; zeros(maxNNZ, 1)];
+                        vals = [vals; zeros(maxNNZ, 1)];
+                    end
+                    rows(nnzCount+1:nnzCount+newEntries) = rowsBlocks{blockIdx};
+                    cols(nnzCount+1:nnzCount+newEntries) = colsBlocks{blockIdx};
+                    vals(nnzCount+1:nnzCount+newEntries) = valsBlocks{blockIdx};
+                    nnzCount = nnzCount + newEntries;
+                end
+            elseif returnS && exist('Lfull', 'var')
+                % Combine dense smoother rows
+                for jj = 1:size(rowsBlocks{blockIdx}, 1)
+                    rowIdx = rowsBlocks{blockIdx}(jj);
+                    colIdx = colsBlocks{blockIdx}{jj};
+                    valIdx = valsBlocks{blockIdx}{jj};
+                    Lfull(rowIdx, colIdx) = valIdx;
+                end
+            end
+            blockIdx = blockIdx + 1;
+        end
+    end
+else
+    % SERIAL/GPU IMPLEMENTATION (original optimized)
+    for i0 = 1:blockSize:m
+        i1 = min(m, i0+blockSize-1);
+        idxBlock = i0:i1;
+        Xte = Xtg(idxBlock, :);
+        b = size(Xte,1);
+        
+        XteinvH = Xte * invH;
+        
+        if useNN && ~isempty(kd) && ~isempty(k)
+            [nnIdx, ~] = knnsearch(kd, gather(Xte), 'K', k);
+        else
+            nnIdx = [];
+        end
+
+        for jj = 1:b
+            if useNN
+                if ~isempty(nnIdx)
+                    idx = nnIdx(jj, :);
+                else
+                    diffs = Xg - Xte(jj, :);
+                    D2 = sum((diffs * invH) .* diffs, 2);
+                    
+                    if ~isempty(k)
+                        [~, idx] = mink(D2, k);
+                    elseif ~isempty(radius)
+                        idx = find(D2 <= radius^2);
+                        if isempty(idx), idx = 1; end
+                    else
+                        idx = 1:n;
+                    end
+                end
+            else
+                idx = 1:n;
+            end
+
+            Xi = Xg(idx, :);
+            yi = yg(idx);
+            
+            diffs = Xi - Xte(jj, :);
+            arg = sum((diffs * invH) .* diffs, 2);
+            w = kernel_weight(arg, kernelName, kernelConst);
+            
+            if max(w) < 1e-15
+                Yhat(i0 + jj - 1) = 0;
+                continue;
+            end
+
+            Z = eval_poly_basis_fast(diffs, terms, p);
+            sqrtW = sqrt(w);
+            WZ = Z .* sqrtW;
+            Wy = yi .* sqrtW;
+
+            G = WZ' * WZ + reg * eye(p, 'like', WZ);
+            rhs = WZ' * Wy;
+            beta = G \ rhs;
+            
+            Yhat(i0 + jj - 1) = beta(constIdx);
+
+            if returnS
+                A = G \ (Z' .* w');
+                L_row_sel = A(constIdx, :)';
+                
+                if exist('nnzCount', 'var')
+                    newEntries = numel(idx);
+                    if nnzCount + newEntries > length(rows)
+                        rows = [rows; zeros(maxNNZ, 1)];
+                        cols = [cols; zeros(maxNNZ, 1)];
+                        vals = [vals; zeros(maxNNZ, 1)];
+                    end
+                    rows(nnzCount+1:nnzCount+newEntries) = i0 + jj - 1;
+                    cols(nnzCount+1:nnzCount+newEntries) = idx;
+                    vals(nnzCount+1:nnzCount+newEntries) = gather(L_row_sel);
+                    nnzCount = nnzCount + newEntries;
+                else
+                    Lfull(i0+jj-1, idx) = gather(L_row_sel)';
+                end
+            end
+        end
+    end
+end
