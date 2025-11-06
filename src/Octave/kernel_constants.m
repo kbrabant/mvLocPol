@@ -1,4 +1,4 @@
-%% Calculate the constant to make the kernel a density
+% Calculate the constant to make the kernel a density
 function const = kernel_constants(kernel, d, detH)
     switch kernel
         case 'Epa'
@@ -14,4 +14,5 @@ function const = kernel_constants(kernel, d, detH)
     end
     const = cd / detH;
 end
+
 
