@@ -256,3 +256,189 @@ else
         end
     end
 end
+
+% Finalize outputs
+if returnS
+    if exist('nnzCount', 'var')
+        L = sparse(rows(1:nnzCount), cols(1:nnzCount), vals(1:nnzCount), m, n);
+    elseif exist('Lfull', 'var')
+        L = Lfull;
+    else
+        L = [];
+    end
+else
+    L = [];
+end
+
+if useGPU
+    Yhat = gather(Yhat);
+    if ~isempty(L) && isa(L,'gpuArray')
+        L = gather(L);
+    end
+end
+
+end
+
+%% Block processing function (for parallel execution)
+function varargout = process_block(i0, i1, X, y, Xt, invH, kd, ...
+    kernelName, kernelConst, terms, constIdx, reg, k, radius, useNN, returnS)
+
+    n = size(X, 1);
+    p = size(terms, 1);  % Compute p from terms
+    Xte = Xt(i0:i1, :);
+    b = size(Xte, 1);
+    YhatBlock = zeros(b, 1);
+    
+    if returnS
+        rowsBlock = [];
+        colsBlock = [];
+        valsBlock = [];
+    end
+    
+    if useNN && ~isempty(kd) && ~isempty(k)
+        [nnIdx, ~] = knnsearch(kd, Xte, 'K', k);
+    else
+        nnIdx = [];
+    end
+    
+    for jj = 1:b
+        if useNN
+            if ~isempty(nnIdx)
+                idx = nnIdx(jj, :);
+            else
+                diffs = X - Xte(jj, :);
+                D2 = sum((diffs * invH) .* diffs, 2);
+                
+                if ~isempty(k)
+                    [~, idx] = mink(D2, k);
+                elseif ~isempty(radius)
+                    idx = find(D2 <= radius^2);
+                    if isempty(idx), idx = 1; end
+                else
+                    idx = 1:n;
+                end
+            end
+        else
+            idx = 1:n;
+        end
+        
+        Xi = X(idx, :);
+        yi = y(idx);
+        
+        diffs = Xi - Xte(jj, :);
+        arg = sum((diffs * invH) .* diffs, 2);
+        w = kernel_weight(arg, kernelName, kernelConst);
+        
+        if max(w) < 1e-15
+            YhatBlock(jj) = 0;
+            continue;
+        end
+        
+        Z = eval_poly_basis_fast(diffs, terms, p);
+        sqrtW = sqrt(w);
+        WZ = Z .* sqrtW;
+        Wy = yi .* sqrtW;
+        
+        G = WZ' * WZ + reg * eye(p);
+        rhs = WZ' * Wy;
+        beta = G \ rhs;
+        
+        YhatBlock(jj) = beta(constIdx);
+        
+        if returnS
+            A = G \ (Z' .* w');
+            L_row_sel = A(constIdx, :)';
+            
+            rowsBlock = [rowsBlock; repmat(i0+jj-1, numel(idx), 1)];
+            colsBlock = [colsBlock; idx(:)];
+            valsBlock = [valsBlock; L_row_sel(:)];
+        end
+    end
+    
+    varargout{1} = YhatBlock;
+    if returnS
+        varargout{2} = rowsBlock;
+        varargout{3} = colsBlock;
+        varargout{4} = valsBlock;
+    end
+end
+
+%% Helper functions
+
+function val = getopt(s, name, default)
+    if isfield(s,name), val = s.(name);
+    else, val = default; end
+end
+
+function [terms, p] = poly_terms(d, deg)
+    terms = zeros(0, d);
+    for t = 0:deg
+        termsT = compose_vec(d, t);
+        terms = [terms; termsT];
+    end
+    p = size(terms, 1);
+end
+
+function C = compose_vec(d, total)
+    if d == 1
+        C = total;
+        return;
+    end
+    if total == 0
+        C = zeros(1, d);
+        return;
+    end
+    
+    C = [];
+    for k = 0:total
+        tail = compose_vec(d-1, total-k);
+        C = [C; repmat(k, size(tail,1), 1), tail];
+    end
+end
+
+function Z = eval_poly_basis_fast(diffs, terms, p)
+    k = size(diffs, 1);
+    if nargin < 3
+        p = size(terms, 1);  % Compute p if not provided
+    end
+    Z = ones(k, p, 'like', diffs);
+    
+    for dim = 1:size(terms, 2)
+        exps = terms(:, dim)';
+        nonzero = exps ~= 0;
+        if any(nonzero)
+            Z(:, nonzero) = Z(:, nonzero) .* (diffs(:, dim) .^ exps(nonzero));
+        end
+    end
+end
+
+function w = kernel_weight(arg, kernelName, kernelConst)
+    switch lower(kernelName)
+        case 'gauss'
+            w = kernelConst * exp(-0.5 * arg);
+        case 'epa'
+            w = kernelConst * max(0, 1 - arg);
+        case 'bimodgauss'
+            w = kernelConst * arg .* exp(-arg);
+        case 'triangle'
+            w = kernelConst * max(1 - sqrt(arg), 0);
+        otherwise
+            w = kernelConst * exp(-0.5 * arg);
+    end
+end
+
+function const = kernel_constants(kernel, d, detH)
+    switch lower(kernel)
+        case 'epa'
+            cd = ((d + 2) * gamma(d/2 + 1)) / (2 * pi^(d/2));
+        case 'gauss'
+            cd = (2 * pi)^(-d / 2);
+        case 'bimodgauss'
+            cd = 2 / (pi^(d/2) * d);
+        case 'triangle'
+            cd = d * (d + 1) * gamma(d / 2) / (2 * pi^(d/2));
+        otherwise
+            cd = (2 * pi)^(-d / 2);
+    end
+    const = cd / detH;
+end
