@@ -364,7 +364,6 @@ function varargout = process_block(i0, i1, X, y, Xt, invH, kd, ...
 end
 
 %% Helper functions
-
 function val = getopt(s, name, default)
     if isfield(s,name), val = s.(name);
     else, val = default; end
@@ -387,8 +386,7 @@ function C = compose_vec(d, total)
     if total == 0
         C = zeros(1, d);
         return;
-    end
-    
+    end    
     C = [];
     for k = 0:total
         tail = compose_vec(d-1, total-k);
@@ -401,8 +399,7 @@ function Z = eval_poly_basis_fast(diffs, terms, p)
     if nargin < 3
         p = size(terms, 1);  % Compute p if not provided
     end
-    Z = ones(k, p, 'like', diffs);
-    
+    Z = ones(k, p, 'like', diffs);    
     for dim = 1:size(terms, 2)
         exps = terms(:, dim)';
         nonzero = exps ~= 0;
