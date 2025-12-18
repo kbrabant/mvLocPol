@@ -1,4 +1,4 @@
-function [Hopt,loocv,opt] = cvlocpol(X, y, deg, kernel, Hinit)
+function [Hopt,loocv,opt] = cvlocpol(X,y,deg,kernel,Hinit)
 %   opt: struct with fields
 %       .H      dxd bandwidth matrix (required)
 %       .k      integer, number of nearest neighbors to use (optional)
