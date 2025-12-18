@@ -1,4 +1,4 @@
-function [Yhat, L] = mvlocpol(X, y, Xt, options)
+function [Yhat,L] = mvlocpol(X,y,Xt,options)
 % MVLOCPOL:  Fast multivariate local polynomial regression (degrees 0,1,2,3)
 % OPTIMIZED VERSION with parallel processing and vectorization
 % Usage: [Yhat, L] = mvlocpol(X, y, Xt, options)
